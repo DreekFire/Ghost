@@ -1,0 +1,5 @@
+lib/**
+include/*/**
+cmake-build-debug
+.idea
+.DS_Store
