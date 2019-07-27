@@ -136,26 +136,29 @@ listenFlag(), outputQueue(outQ), rc() {
     if (!rc.ring_buffer) {
         throw std::runtime_error("out of memory\n");
     }
+}
 
+Listener::~Listener() {
+    soundio_destroy(inStream->device->soundio);
+    soundio_instream_destroy(inStream); // if inStream is already NULL this will just return
+}
+
+void Listener::start() {
+    int err;
+    listenFlag.test_and_set(std::memory_order_release);
     if ((err = soundio_instream_start(inStream))) {
         char error_msg[64];
         sprintf(error_msg, "unable to start input device: %s", soundio_strerror(err));
         throw std::runtime_error(error_msg);
     }
-}
-
-Listener::~Listener() {
-    soundio_destroy(inStream->device->soundio);
-    soundio_instream_destroy(inStream);
-}
-
-void Listener::start() {
-    listenFlag.test_and_set(std::memory_order_release);
     listenThread = std::thread(&Listener::listen, this);
 }
 
 void Listener::stop() {
     listenFlag.clear(std::memory_order_release);
+    if(soundio_instream_pause(inStream, true) == SoundIoError::SoundIoErrorIncompatibleDevice) {
+        soundio_instream_destroy(inStream);
+    }
     listenThread.join();
 }
 
@@ -166,7 +169,7 @@ std::vector<float> Listener::listen() {
     FILE *out_f = fopen("test.raw", "wb");
     while (listenFlag.test_and_set(std::memory_order_acquire)) {
         soundio_flush_events(inStream->device->soundio);
-        sleep(1);
+        //sleep(1);
         int fill_bytes = soundio_ring_buffer_fill_count(rc.ring_buffer);
         char *read_buf = soundio_ring_buffer_read_ptr(rc.ring_buffer);
         size_t amt = fwrite(read_buf, 1, fill_bytes, out_f);
@@ -182,12 +185,13 @@ std::vector<float> Listener::listen() {
 }
 
 void Listener::readCallback(struct SoundIoInStream* inStream, int frameCountMin, int frameCountMax) {
-    auto rc = static_cast<RecordContext*>(inStream->userdata);
+    auto recCon = static_cast<RecordContext*>(inStream->userdata);
     struct SoundIoChannelArea* areas;
     int err;
 
-    char *write_ptr = soundio_ring_buffer_write_ptr(rc->ring_buffer);
-    int freeBytes = soundio_ring_buffer_free_count(rc->ring_buffer);
+    //was getting exc_bad_access (segfault) here because inStream kept running even after Listener got destructed
+    char *write_ptr = soundio_ring_buffer_write_ptr(recCon->ring_buffer);
+    int freeBytes = soundio_ring_buffer_free_count(recCon->ring_buffer);
     int freeCount = freeBytes / inStream->bytes_per_frame;
 
     if (freeCount < frameCountMin) {
@@ -201,7 +205,7 @@ void Listener::readCallback(struct SoundIoInStream* inStream, int frameCountMin,
     for (;;) {
         int frameCount = framesLeft;
 
-        if ((err = soundio_instream_begin_read(inStream, &areas, &frameCount))) {
+        if ((err = soundio_instream_begin_read(inStream, &areas, &frameCount))) { //exc_bad_access here too
             fprintf(stderr, "begin read error: %s", soundio_strerror(err));
             exit(1);
         }
@@ -234,7 +238,7 @@ void Listener::readCallback(struct SoundIoInStream* inStream, int frameCountMin,
     }
 
     int advanceBytes = writeFrames * inStream->bytes_per_frame;
-    soundio_ring_buffer_advance_write_ptr(rc->ring_buffer, advanceBytes);
+    soundio_ring_buffer_advance_write_ptr(recCon->ring_buffer, advanceBytes);
 }
 
 void Listener::overflow_callback(struct SoundIoInStream *inStream) {
